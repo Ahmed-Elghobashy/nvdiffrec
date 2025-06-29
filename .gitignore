@@ -1,0 +1,5 @@
+/out/
+/data/
+__pycache__/
+*.tar.xz
+blender-3.6.5-linux-x64/
