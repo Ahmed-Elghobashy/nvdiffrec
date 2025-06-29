@@ -37,7 +37,7 @@ from render import mlptexture
 from render import light
 from render import render
 
-RADIUS = 3.0
+RADIUS = 2.0
 
 # Enable to debug back-prop anomalies
 # torch.autograd.set_detect_anomaly(True)
@@ -191,6 +191,8 @@ def validate_itr(glctx, target, geometry, opt_material, lgt, FLAGS):
 
         buffers = geometry.render(glctx, target, lgt, opt_material)
 
+        # print("opt material is ", opt_material)
+        # result_dict['opt_kd'] = geometry.material["kd"]
         result_dict['ref'] = util.rgb_to_srgb(target['img'][...,0:3])[0]
         result_dict['opt'] = util.rgb_to_srgb(buffers['shaded'][...,0:3])[0]
         result_image = torch.cat([result_dict['opt'], result_dict['ref']], axis=1)
@@ -398,11 +400,21 @@ def optimize_mesh(
             save_image = FLAGS.save_interval and (it % FLAGS.save_interval == 0)
             if display_image or save_image:
                 result_image, result_dict = validate_itr(glctx, prepare_batch(next(v_it), FLAGS.background), geometry, opt_material, lgt, FLAGS)
+
                 np_result_image = result_image.detach().cpu().numpy()
                 if display_image:
                     util.display_image(np_result_image, title='%d / %d' % (it, FLAGS.iter))
+                    
                 if save_image:
+                    # print(result_dict)
+
+                    # diffuse_albedo_image.detach().to(torch.float32, copy=False).cpu()
+                    # print(diffuse_albedo_image.shape)
                     util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d.png' % (pass_name, img_cnt)), np_result_image)
+                    # util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d_kd.png' % (pass_name, img_cnt)), diffuse_albedo_image)
+
+                    texture.save_texture2D(FLAGS.out_dir + '/' + ('img_%s_%06d_kd.png' % (pass_name, img_cnt)), texture.rgb_to_srgb(opt_material['kd']))
+
                     img_cnt = img_cnt+1
 
         iter_start_time = time.time()
@@ -509,7 +521,8 @@ if __name__ == "__main__":
     FLAGS.mesh_scale          = 2.1                      # Scale of tet grid box. Adjust to cover the model
     FLAGS.env_scale           = 1.0                      # Env map intensity multiplier
     FLAGS.envmap              = None                     # HDR environment probe
-    FLAGS.display             = None                     # Conf validation window/display. E.g. [{"relight" : <path to envlight>}]
+    FLAGS.display             = [{'bsdf': 'kd'}]         
+    # Conf validation window/display. E.g. [{"relight" : <path to envlight>}]
     FLAGS.camera_space_light  = False                    # Fixed light in camera space. This is needed for setups like ethiopian head where the scanned object rotates on a stand.
     FLAGS.lock_light          = False                    # Disable light optimization in the second pass
     FLAGS.lock_pos            = False                    # Disable vertex position optimization in the second pass
@@ -578,8 +591,10 @@ if __name__ == "__main__":
 
     # ==============================================================================================
     #  Create env light with trainable parameters
-    # ==============================================================================================
+    # =============================================================================================
     
+    FLAGS.learn_light = False
+    FLAGS.lock_pos = True
     if FLAGS.learn_light:
         lgt = light.create_trainable_env_rnd(512, scale=0.0, bias=0.5)
     else:
@@ -638,12 +653,16 @@ if __name__ == "__main__":
 
         # Load initial guess mesh from file
         base_mesh = mesh.load_mesh(FLAGS.base_mesh)
+
+        center = base_mesh.v_pos.mean(dim=0, keepdim=True)
+        base_mesh.v_pos -= center
+
         geometry = DLMesh(base_mesh, FLAGS)
         
         mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
 
         geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS, pass_idx=0, pass_name="mesh_pass", 
-                                        warmup_iter=100, optimize_light=not FLAGS.lock_light, optimize_geometry=not FLAGS.lock_pos)
+                                        warmup_iter=100, optimize_light= False, optimize_geometry=not FLAGS.lock_pos)
 
     # ==============================================================================================
     #  Validate

@@ -424,14 +424,14 @@ def save_image(fn, x : np.ndarray):
             imageio.imwrite(fn, np.clip(np.rint(x * 255.0), 0, 255).astype(np.uint8), compress_level=3) # Low compression for faster saving
         else:
             imageio.imwrite(fn, np.clip(np.rint(x * 255.0), 0, 255).astype(np.uint8))
-    except:
-        print("WARNING: FAILED to save image %s" % fn)
+    except Exception as e:                      # catch *all* run-time errors
+        print(f"WARNING: failed to save image '{fn}': {e}")
 
 def save_image_raw(fn, x : np.ndarray):
     try:
         imageio.imwrite(fn, x)
-    except:
-        print("WARNING: FAILED to save image %s" % fn)
+    except Exception as e:                      # catch *all* run-time errors
+        print(f"WARNING: failed to save image '{fn}': {e}")
 
 
 def load_image_raw(fn) -> np.ndarray:

@@ -29,7 +29,7 @@ class DatasetMesh(Dataset):
         self.cam_radius         = cam_radius
         self.FLAGS              = FLAGS
         self.validate           = validate
-        self.fovy               = np.deg2rad(45)
+        self.fovy               = np.deg2rad(30)
         self.aspect             = FLAGS.train_res[1] / FLAGS.train_res[0]
 
         if self.FLAGS.local_rank == 0:
@@ -46,6 +46,11 @@ class DatasetMesh(Dataset):
         self.envlight = light.load_env(FLAGS.envmap, scale=FLAGS.env_scale)
         
         self.ref_mesh = mesh.compute_tangents(ref_mesh)
+
+
+        # center the mesh
+        center = self.ref_mesh.v_pos.mean(dim=0, keepdim=True)
+        self.ref_mesh.v_pos -= center
 
     def _rotate_scene(self, itr):
         proj_mtx = util.perspective(self.fovy, self.FLAGS.display_res[1] / self.FLAGS.display_res[0], self.FLAGS.cam_near_far[0], self.FLAGS.cam_near_far[1])
