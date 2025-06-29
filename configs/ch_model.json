@@ -1,0 +1,29 @@
+{
+    "ref_mesh": "data/ch_obj/chinnese_chandeler.obj",
+    "random_textures": true,
+    "iter": 10000,
+    "save_interval": 100,
+    "texture_res": [
+        1024,
+        1024
+    ],
+    "train_res": [
+        512,
+        512
+    ],
+    "batch": 4,
+    "learning_rate": [
+        0.03,
+        0.003
+    ],
+    "ks_min": [
+        0,
+        0.25,
+        0
+    ],
+    "envmap": "data/irrmaps/aerodynamics_workshop_2k.hdr",
+    "env_scale": 2.0,
+    "background": "white",
+    "validate": false,
+    "out_dir": "ch_locked_train_lock_lighting_no_learn_light_ks_2.0_radius_30_degree_center_position"
+}
