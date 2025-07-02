@@ -37,6 +37,11 @@ from render import mlptexture
 from render import light
 from render import render
 
+from intrinsic.pipeline import load_models
+
+import torch.nn.functional as F
+
+
 RADIUS = 2.0
 
 # Enable to debug back-prop anomalies
@@ -299,7 +304,73 @@ class Trainer(torch.nn.Module):
             if self.FLAGS.camera_space_light:
                 self.light.xfm(target['mv'])
 
-        return self.geometry.tick(glctx, target, self.light, self.material, self.image_loss_fn, it)
+        # -------------------------------------------------------------
+        #  2. Regular render + baseline losses
+        # -------------------------------------------------------------
+
+
+        img_loss, reg_loss = self.geometry.tick(glctx, target,
+                                                self.light,
+                                                self.material,
+                                                self.image_loss_fn,
+                                                it)
+        
+
+
+        # Buffers saved a moment ago inside geometry.tick(...)
+        import torch.nn.functional as F
+        from intrinsic.pipeline import run_pipeline
+
+
+        buffers = self.geometry.kd_buffers
+        # print("############")
+        # print(buffers.keys())
+        rgba    = buffers['shaded']                       # [B,H,W,4]
+        mask    = rgba[..., 3:].permute(0,3,1,2)          # [B,1,H,W]
+
+        pred_list = []
+        for img_tensor in rgba[..., :3]:                  # img_tensor = [H,W,3], GPU
+            img_np = img_tensor.detach().cpu().numpy()   # H,W,3  (correct)
+            h, w   = img_np.shape[1:]
+            base   = min(h, w)
+
+            alb_np = run_pipeline(
+                self.ordinal_models,
+                img_np,
+                stage=4,
+                base_size=base,
+                device='cuda')['hr_alb']                  # (3,H,W) float32
+
+            alb_pred = torch.from_numpy(alb_np).permute(2,0,1)  # → 3,H,W
+            alb_pred = alb_pred.to(img_tensor.device)
+
+            # --- NEW: match cur_kd resolution ---
+            orig_h, orig_w = img_tensor.shape[:2]                       # 1024,1024 here
+            if (alb_pred.shape[1], alb_pred.shape[2]) != (orig_h, orig_w):
+                alb_pred = torch.nn.functional.interpolate(
+                    alb_pred.unsqueeze(0),               # 1,3,H,W
+                    size=(orig_h, orig_w),
+                    mode='bilinear',
+                    align_corners=False
+                )[0]                                     # back to 3,H,W
+
+            pred_list.append(alb_pred)
+
+        pred_alb = torch.stack(pred_list, 0)              # [B,3,H,W]
+
+        # b) current kd (rendered diffuse)
+        cur_kd = buffers['shaded'][..., :3].permute(0,3,1,2)  # [B,3,H,W]
+
+        # c) masked L1
+        intr_loss = F.l1_loss(pred_alb * mask, cur_kd * mask)
+
+        reg_loss  = reg_loss + self.lambda_intr * intr_loss
+
+
+        self.last_intr_loss = intr_loss.detach()
+
+        return img_loss, reg_loss        # ←  make sure this is last
+
 
 def optimize_mesh(
     glctx,
@@ -334,8 +405,13 @@ def optimize_mesh(
     #  Image loss
     # ==============================================================================================
     image_loss_fn = createLoss(FLAGS)
-
     trainer_noddp = Trainer(glctx, geometry, lgt, opt_material, optimize_geometry, optimize_light, image_loss_fn, FLAGS)
+
+
+    ordinal_models = load_models('v2', device='cuda')    
+    trainer_noddp.ordinal_models = ordinal_models
+    trainer_noddp.lambda_intr     = 0.3   # e.g. 0.1
+
     if FLAGS.isosurface == 'flexicubes':
         betas = (0.7, 0.9)
     else:
@@ -371,6 +447,7 @@ def optimize_mesh(
     img_loss_vec = []
     reg_loss_vec = []
     iter_dur_vec = []
+    intr_loss_vec = []
 
     dataloader_train    = torch.utils.data.DataLoader(dataset_train, batch_size=FLAGS.batch, collate_fn=dataset_train.collate, shuffle=True)
     dataloader_validate = torch.utils.data.DataLoader(dataset_validate, batch_size=1, collate_fn=dataset_train.collate)
@@ -430,6 +507,8 @@ def optimize_mesh(
         #  Training
         # ==============================================================================================
         img_loss, reg_loss = trainer(target, it)
+        intr_loss_vec.append(trainer.last_intr_loss.item())
+
 
         # ==============================================================================================
         #  Final loss
@@ -478,11 +557,12 @@ def optimize_mesh(
         if it % log_interval == 0 and FLAGS.local_rank == 0:
             img_loss_avg = np.mean(np.asarray(img_loss_vec[-log_interval:]))
             reg_loss_avg = np.mean(np.asarray(reg_loss_vec[-log_interval:]))
+            intr_loss_avg = np.mean(intr_loss_vec[-log_interval:])
             iter_dur_avg = np.mean(np.asarray(iter_dur_vec[-log_interval:]))
             
             remaining_time = (FLAGS.iter-it)*iter_dur_avg
-            print("iter=%5d, img_loss=%.6f, reg_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" % 
-                (it, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
+            print("iter=%5d, img_loss=%.6f, reg_loss=%.6f, intrinsc_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" % 
+                (it, img_loss_avg, reg_loss_avg, intr_loss_avg ,optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
 
     return geometry, opt_material
 

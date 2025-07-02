@@ -54,7 +54,10 @@ class DLMesh(torch.nn.Module):
         #  Render optimizable object with identical conditions
         # ==============================================================================================
         buffers = self.render(glctx, target, lgt, opt_material)
-
+        kd_buffers = self.render(glctx, target, lgt, opt_material, bsdf='kd')
+ 
+        self.kd_buffers = kd_buffers
+        
         # ==============================================================================================
         #  Compute loss
         # ==============================================================================================

@@ -218,12 +218,20 @@ class DMTetGeometry(torch.nn.Module):
         # ==============================================================================================
         buffers = self.render(glctx, target, lgt, opt_material)
 
+        #Save the last rendere buffers so we can use them in the intrinsics loss
+
+        kd_buffers = self.geometry.render(self.glctx, target, self.light, self.material, bsdf='kd')
+ 
+        self.kd_buffers = kd_buffers
+
         # ==============================================================================================
         #  Compute loss
         # ==============================================================================================
         t_iter = iteration / self.FLAGS.iter
 
         # Image-space loss, split into a coverage component and a color component
+        # TODO add the intrinsic loss here
+
         color_ref = target['img']
         img_loss = torch.nn.functional.mse_loss(buffers['shaded'][..., 3:], color_ref[..., 3:]) 
         img_loss = img_loss + loss_fn(buffers['shaded'][..., 0:3] * color_ref[..., 3:], color_ref[..., 0:3] * color_ref[..., 3:])
