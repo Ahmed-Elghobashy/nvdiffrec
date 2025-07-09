@@ -38,6 +38,8 @@ from render import light
 from render import render
 
 from intrinsic.pipeline import load_models
+import torch.nn.functional as F
+from intrinsic.pipeline import run_pipeline
 
 import torch.nn.functional as F
 
@@ -290,6 +292,10 @@ class Trainer(torch.nn.Module):
         self.image_loss_fn = image_loss_fn
         self.FLAGS = FLAGS
 
+        self.use_intrinsic = getattr(FLAGS, 'use_intrinsic', False)  # *** NEW ***
+        self.lambda_intr   = getattr(FLAGS, 'intrinsic_lambda', 0.1) # *** NEW ***
+
+
         if not self.optimize_light:
             with torch.no_grad():
                 self.light.build_mips()
@@ -317,59 +323,61 @@ class Trainer(torch.nn.Module):
         
 
 
-        # Buffers saved a moment ago inside geometry.tick(...)
-        import torch.nn.functional as F
-        from intrinsic.pipeline import run_pipeline
+        if self.use_intrinsic:    
+
+            # Buffers saved a moment ago inside geometry.tick(...)
+                             
+            buffers = self.geometry.kd_buffers
+            # print("############")
+            # print(buffers.keys())
+            rgba    = buffers['shaded']                       # [B,H,W,4]
+            mask    = rgba[..., 3:].permute(0,3,1,2)          # [B,1,H,W]
+
+            pred_list = []
+            for img_tensor in rgba[..., :3]:                  # img_tensor = [H,W,3], GPU
+                img_np = img_tensor.detach().cpu().numpy()   # H,W,3  (correct)
+                h, w   = img_np.shape[1:]
+                base   = min(h, w)
+
+                alb_np = run_pipeline(
+                    self.ordinal_models,
+                    img_np,
+                    stage=4,
+                    base_size=base,
+                    device='cuda')['hr_alb']                  # (3,H,W) float32
+
+                alb_pred = torch.from_numpy(alb_np).permute(2,0,1)  # → 3,H,W
+                alb_pred = alb_pred.to(img_tensor.device)
+
+                # --- NEW: match cur_kd resolution ---
+                orig_h, orig_w = img_tensor.shape[:2]                       # 1024,1024 here
+                if (alb_pred.shape[1], alb_pred.shape[2]) != (orig_h, orig_w):
+                    alb_pred = torch.nn.functional.interpolate(
+                        alb_pred.unsqueeze(0),               # 1,3,H,W
+                        size=(orig_h, orig_w),
+                        mode='bilinear',
+                        align_corners=False
+                    )[0]                                     # back to 3,H,W
+
+                pred_list.append(alb_pred)
+
+            pred_alb = torch.stack(pred_list, 0)              # [B,3,H,W]
+
+            # b) current kd (rendered diffuse)
+            cur_kd = buffers['shaded'][..., :3].permute(0,3,1,2)  # [B,3,H,W]
+
+            # c) masked L1
+            intr_loss = F.l1_loss(pred_alb * mask, cur_kd * mask)
+
+            reg_loss  = reg_loss + self.lambda_intr * intr_loss
 
 
-        buffers = self.geometry.kd_buffers
-        # print("############")
-        # print(buffers.keys())
-        rgba    = buffers['shaded']                       # [B,H,W,4]
-        mask    = rgba[..., 3:].permute(0,3,1,2)          # [B,1,H,W]
+            self.last_intr_loss = intr_loss.detach()
+        else:                                                  
+            # last_intr_loss is used in logging
+            self.last_intr_loss = torch.tensor(0.0, device=img_loss.device)
 
-        pred_list = []
-        for img_tensor in rgba[..., :3]:                  # img_tensor = [H,W,3], GPU
-            img_np = img_tensor.detach().cpu().numpy()   # H,W,3  (correct)
-            h, w   = img_np.shape[1:]
-            base   = min(h, w)
-
-            alb_np = run_pipeline(
-                self.ordinal_models,
-                img_np,
-                stage=4,
-                base_size=base,
-                device='cuda')['hr_alb']                  # (3,H,W) float32
-
-            alb_pred = torch.from_numpy(alb_np).permute(2,0,1)  # → 3,H,W
-            alb_pred = alb_pred.to(img_tensor.device)
-
-            # --- NEW: match cur_kd resolution ---
-            orig_h, orig_w = img_tensor.shape[:2]                       # 1024,1024 here
-            if (alb_pred.shape[1], alb_pred.shape[2]) != (orig_h, orig_w):
-                alb_pred = torch.nn.functional.interpolate(
-                    alb_pred.unsqueeze(0),               # 1,3,H,W
-                    size=(orig_h, orig_w),
-                    mode='bilinear',
-                    align_corners=False
-                )[0]                                     # back to 3,H,W
-
-            pred_list.append(alb_pred)
-
-        pred_alb = torch.stack(pred_list, 0)              # [B,3,H,W]
-
-        # b) current kd (rendered diffuse)
-        cur_kd = buffers['shaded'][..., :3].permute(0,3,1,2)  # [B,3,H,W]
-
-        # c) masked L1
-        intr_loss = F.l1_loss(pred_alb * mask, cur_kd * mask)
-
-        reg_loss  = reg_loss + self.lambda_intr * intr_loss
-
-
-        self.last_intr_loss = intr_loss.detach()
-
-        return img_loss, reg_loss        # ←  make sure this is last
+        return img_loss, reg_loss        
 
 
 def optimize_mesh(
@@ -406,6 +414,15 @@ def optimize_mesh(
     # ==============================================================================================
     image_loss_fn = createLoss(FLAGS)
     trainer_noddp = Trainer(glctx, geometry, lgt, opt_material, optimize_geometry, optimize_light, image_loss_fn, FLAGS)
+
+
+    trainer_noddp.use_intrinsic = FLAGS.use_intrinsic      
+    trainer_noddp.lambda_intr   = FLAGS.intrinsic_lambda  
+    # -------------------------------------------------
+
+    if FLAGS.use_intrinsic:                                
+        ordinal_models = load_models('v2', device='cuda')
+        trainer_noddp.ordinal_models = ordinal_models
 
 
     ordinal_models = load_models('v2', device='cuda')    
@@ -593,6 +610,11 @@ if __name__ == "__main__":
     parser.add_argument('-bm', '--base-mesh', type=str, default=None)
     parser.add_argument('--validate', type=bool, default=True)
     parser.add_argument('--isosurface', default='dmtet', choices=['dmtet', 'flexicubes'])
+    parser.add_argument('-intr-loss','--use-intrinsic', action='store_true',      
+                    help='Enable intrinsic-image L1 loss')
+    parser.add_argument('-intr-lambda','--intrinsic-lambda', type=float, default=0.1,
+                    help='Weight for intrinsic loss when enabled')
+
     
     FLAGS = parser.parse_args()
 

@@ -8,8 +8,8 @@
         1024
     ],
     "train_res": [
-        512,
-        512
+        1024,
+        1024
     ],
     "batch": 4,
     "learning_rate": [
@@ -25,5 +25,7 @@
     "env_scale": 2.0,
     "background": "white",
     "validate": false,
-    "out_dir": "lion_head"
+    "out_dir": "lion_head_exp_01_baseline",
+    "use_intrinsic": false,
+    "intrinsic_lambda": 0.3
 }
