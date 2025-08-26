@@ -44,7 +44,7 @@ from intrinsic.pipeline import run_pipeline
 import torch.nn.functional as F
 
 
-RADIUS = 2.0
+RADIUS = 6.0
 
 # Enable to debug back-prop anomalies
 # torch.autograd.set_detect_anomaly(True)
@@ -215,7 +215,11 @@ def validate_itr(glctx, target, geometry, opt_material, lgt, FLAGS):
                     if not isinstance(layer['relight'], light.EnvironmentLight):
                         layer['relight'] = light.load_env(layer['relight'])
                     img = geometry.render(glctx, target, layer['relight'], opt_material)
-                    result_dict['relight'] = util.rgb_to_srgb(img[..., 0:3])[0]
+
+
+                    rgb  = img['shaded'][..., 0:3]          # pick the shaded buffer
+                    result_dict['relight'] = util.rgb_to_srgb(rgb)[0]
+
                     result_image = torch.cat([result_image, result_dict['relight']], axis=1)
                 elif 'bsdf' in layer:
                     buffers = geometry.render(glctx, target, lgt, opt_material, bsdf=layer['bsdf'])
@@ -373,6 +377,31 @@ class Trainer(torch.nn.Module):
 
 
             self.last_intr_loss = intr_loss.detach()
+
+
+
+            # -------------- NEW: optional ordinal-debug dump -----------------
+            if self.FLAGS.save_interval and (it % self.FLAGS.save_interval == 0):
+                # 1. save the RGB input that went into run_pipeline
+                srgb_in = util.rgb_to_srgb(                      # expects Tensor
+                            torch.from_numpy(img_np)             # H,W,3  → Tensor
+                                .to(dtype=torch.float32, device='cpu')
+                        ).numpy()                              # back to NumPy for save_image
+                util.save_image(f"{self.FLAGS.out_dir}/ord_input_{it:06d}.png", srgb_in)
+
+                # --- PREDICTED ALBEDO ------------------------------------
+                def hwc(arr):
+                    # numpy OR torch → return torch HWC
+                    if arr.ndim == 3 and arr.shape[0] in (3,4):          # CHW → HWC
+                        arr = arr.transpose(1,2,0)
+                    return torch.as_tensor(arr, dtype=torch.float32, device='cuda')
+
+                # ---- inside forward() ----
+                srgb_alb = util.rgb_to_srgb(hwc(alb_np)).cpu().numpy()
+                util.save_image(f"{self.FLAGS.out_dir}/ord_hr_alb_{it:06d}.png", srgb_alb)
+
+                util.save_image(f"{self.FLAGS.out_dir}/ord_hr_alb_{it:06d}.png", srgb_alb)
+
         else:                                                  
             # last_intr_loss is used in logging
             self.last_intr_loss = torch.tensor(0.0, device=img_loss.device)
@@ -681,6 +710,14 @@ if __name__ == "__main__":
     # ==============================================================================================
     if os.path.splitext(FLAGS.ref_mesh)[1] == '.obj':
         ref_mesh         = mesh.load_mesh(FLAGS.ref_mesh, FLAGS.mtl_override)
+
+        bbox = ref_mesh.v_pos
+        bbox_min = ref_mesh.v_pos.min(0).values
+        bbox_max = ref_mesh.v_pos.max(0).values
+        diag     = (bbox_max - bbox_min).norm().item()   # full diagonal length
+        RADIUS   = max(2.0, diag * 2.0)                  # 0.6 ≈ 1.2 × half-diag
+        print(f"Auto-radius set to {RADIUS:.2f}")
+        
         dataset_train    = DatasetMesh(ref_mesh, glctx, RADIUS, FLAGS, validate=False)
         dataset_validate = DatasetMesh(ref_mesh, glctx, RADIUS, FLAGS, validate=True)
     elif os.path.isdir(FLAGS.ref_mesh):
@@ -695,7 +732,7 @@ if __name__ == "__main__":
     #  Create env light with trainable parameters
     # =============================================================================================
     
-    FLAGS.learn_light = False
+    FLAGS.learn_light = True
     FLAGS.lock_pos = True
     if FLAGS.learn_light:
         lgt = light.create_trainable_env_rnd(512, scale=0.0, bias=0.5)
@@ -764,7 +801,7 @@ if __name__ == "__main__":
         mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
 
         geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS, pass_idx=0, pass_name="mesh_pass", 
-                                        warmup_iter=100, optimize_light= False, optimize_geometry=not FLAGS.lock_pos)
+                                        warmup_iter=100, optimize_light= FLAGS.learn_light, optimize_geometry=not FLAGS.lock_pos)
 
     # ==============================================================================================
     #  Validate

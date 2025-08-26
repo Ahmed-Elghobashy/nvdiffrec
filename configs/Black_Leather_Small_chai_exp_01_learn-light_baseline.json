@@ -1,0 +1,24 @@
+{
+  "ref_mesh"        : "data/blender_vault/Black_Leather_Small_chai/mesh.obj",
+  "base_mesh"       : "data/blender_vault/Black_Leather_Small_chai/mesh.obj",
+  "random_textures" : true,
+  "iter"            : 1000,
+  "save_interval"   : 100,
+  "texture_res"     : [2048, 2048],
+  "train_res"       : [1024, 1024],
+  "batch"           : 4,
+  "learning_rate"   : [0.03, 0.003],
+  "ks_min"          : [0, 0.25, 0],
+  "envmap"          : "data/irrmaps/aerodynamics_workshop_2k.hdr",
+  "env_scale"       : 2.0,
+  "background"      : "white",
+  "validate"        : true,
+  "out_dir"         : "Black_Leather_Small_chai_exp_01_learn-light_baseline",
+  "use_intrinsic"   : false,
+  "intrinsic_lambda": 0.3,
+  "display": [
+    {
+      "relight": "data/irrmaps/studio_small_09_4k.hdr"
+    }
+  ]
+}

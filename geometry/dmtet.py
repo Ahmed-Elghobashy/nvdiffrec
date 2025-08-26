@@ -251,3 +251,6 @@ class DMTetGeometry(torch.nn.Module):
 
         return img_loss, reg_loss
 
+
+
+

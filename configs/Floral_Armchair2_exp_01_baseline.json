@@ -1,0 +1,19 @@
+{
+  "ref_mesh"        : "data/blender_vault/Floral_Armchair2/mesh.obj",
+  "base_mesh"       : "data/blender_vault/Floral_Armchair2/mesh.obj",
+  "random_textures" : true,
+  "iter"            : 1000,
+  "save_interval"   : 100,
+  "texture_res"     : [1024, 1024],
+  "train_res"       : [1024, 1024],
+  "batch"           : 4,
+  "learning_rate"   : [0.03, 0.003],
+  "ks_min"          : [0, 0.25, 0],
+  "envmap"          : "data/irrmaps/aerodynamics_workshop_2k.hdr",
+  "env_scale"       : 2.0,
+  "background"      : "white",
+  "validate"        : false,
+  "out_dir"         : "Floral_Armchair2_exp_01_baseline",
+  "use_intrinsic"   : false,
+  "intrinsic_lambda": 0.3
+}
