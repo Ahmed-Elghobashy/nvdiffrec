@@ -289,8 +289,9 @@ class Trainer(torch.nn.Module):
             with torch.no_grad():
                 self.light.build_mips()
 
-        self.params = list(self.material.parameters())
-        self.params += list(self.light.parameters()) if optimize_light else []
+        self.mat_params   = list(self.material.parameters())
+        self.light_params = list(self.light.parameters()) if optimize_light else []
+        self.params       = self.mat_params + self.light_params
         self.geo_params = list(self.geometry.parameters()) if optimize_geometry else []
 
     def forward(self, target, it):
@@ -361,7 +362,12 @@ def optimize_mesh(
             optimizer_mesh = torch.optim.Adam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
             scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
 
-        optimizer = torch.optim.Adam(trainer_noddp.params, lr=learning_rate_mat)
+        optimizer = torch.optim.Adam(
+            [
+                {'params': trainer_noddp.light_params, 'lr': learning_rate_mat},  # group 0: env/light
+                {'params': trainer_noddp.mat_params,   'lr': learning_rate_mat},  # group 1: kd/ks/normal
+            ]
+        )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
 
     # ==============================================================================================
@@ -386,6 +392,21 @@ def optimize_mesh(
     v_it = cycle(dataloader_validate)
 
     for it, target in enumerate(dataloader_train):
+
+        # ---- phase control: env-only -> joint ----
+        if it == 0:
+            # freeze materials for warmup
+            for p in trainer_noddp.mat_params:
+                p.requires_grad_(False)
+
+        if it == FLAGS.env_warmup:
+            # unfreeze materials
+            for p in trainer_noddp.mat_params:
+                p.requires_grad_(True)
+            # slow the env after warmup
+            optimizer.param_groups[0]['lr'] *= FLAGS.env_lr_mult   # light/env group
+            # leave materials LR as-is (group 1)
+
 
         # Mix randomized background into dataset image
         target = prepare_batch(target, 'random')
@@ -513,6 +534,9 @@ if __name__ == "__main__":
     parser.add_argument('-bm', '--base-mesh', type=str, default=None)
     parser.add_argument('--validate', type=bool, default=True)
     parser.add_argument('--isosurface', default='dmtet', choices=['dmtet', 'flexicubes'])
+    parser.add_argument('--env-warmup', type=int, default=800, help='iters of env-only fitting')
+    parser.add_argument('--env-lr-mult', type=float, default=0.1, help='multiply env LR after warmup')
+
     
     FLAGS = parser.parse_args()
 
@@ -524,7 +548,7 @@ if __name__ == "__main__":
     FLAGS.display             = [{'bsdf': 'kd'}]         
     # Conf validation window/display. E.g. [{"relight" : <path to envlight>}]
     FLAGS.camera_space_light  = False                    # Fixed light in camera space. This is needed for setups like ethiopian head where the scanned object rotates on a stand.
-    FLAGS.lock_light          = False                    # Disable light optimization in the second pass
+    FLAGS.lock_light          = True                     # Disable light optimization in the second pass
     FLAGS.lock_pos            = False                    # Disable vertex position optimization in the second pass
     FLAGS.sdf_regularizer     = 0.2                      # Weight for sdf regularizer (see paper for details)
     FLAGS.laplace             = "relative"               # Mesh Laplacian ["absolute", "relative"]
@@ -593,8 +617,7 @@ if __name__ == "__main__":
     #  Create env light with trainable parameters
     # =============================================================================================
     
-    FLAGS.learn_light = False
-    FLAGS.lock_pos = True
+    FLAGS.learn_light =     FLAGS.lock_pos = True
     if FLAGS.learn_light:
         lgt = light.create_trainable_env_rnd(512, scale=0.0, bias=0.5)
     else:
