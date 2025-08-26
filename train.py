@@ -368,7 +368,16 @@ def optimize_mesh(
                 {'params': trainer_noddp.mat_params,   'lr': learning_rate_mat},  # group 1: kd/ks/normal
             ]
         )
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
+        def lr_env(step):  # param group 0 (light/env)
+            base = lr_schedule(step, 0.9)               # your existing decay + (optional) warmup
+            return base if step < FLAGS.env_warmup else base * FLAGS.env_lr_mult
+
+        def lr_mat(step):  # param group 1 (materials)
+            return lr_schedule(step, 0.9)
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=[lr_env, lr_mat]
+        )
 
     # ==============================================================================================
     #  Training loop
@@ -404,7 +413,7 @@ def optimize_mesh(
             for p in trainer_noddp.mat_params:
                 p.requires_grad_(True)
             # slow the env after warmup
-            optimizer.param_groups[0]['lr'] *= FLAGS.env_lr_mult   # light/env group
+            # optimizer.param_groups[0]['lr'] *= FLAGS.env_lr_mult   # light/env group
             # leave materials LR as-is (group 1)
 
 
@@ -434,13 +443,13 @@ def optimize_mesh(
                     util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d.png' % (pass_name, img_cnt)), np_result_image)
                     # util.save_image(FLAGS.out_dir + '/' + ('img_%s_%06d_kd.png' % (pass_name, img_cnt)), diffuse_albedo_image)
 
-                    texture.save_texture2D(FLAGS.out_dir + '/' + ('img_%s_%06d_kd.png' % (pass_name, img_cnt)), texture.rgb_to_srgb(opt_material['kd']))
+                    # texture.save_texture2D(FLAGS.out_dir + '/' + ('img_%s_%06d_kd.png' % (pass_name, img_cnt)), texture.rgb_to_srgb(opt_material['kd']))
 
                     img_cnt = img_cnt+1
 
         iter_start_time = time.time()
 
-        # ==============================================================================================
+        # ===================================glctx===========================================================
         #  Zero gradients
         # ==============================================================================================
         optimizer.zero_grad()
@@ -463,11 +472,16 @@ def optimize_mesh(
         # ==============================================================================================
         #  Backpropagate
         # ==============================================================================================
-        total_loss.backward()
-        if hasattr(lgt, 'base') and lgt.base.grad is not None and optimize_light:
-            lgt.base.grad *= 64
-        if 'kd_ks_normal' in opt_material:
-            opt_material['kd_ks_normal'].encoder.params.grad /= 8.0
+        # Scale light grads (if present)
+        if optimize_light and hasattr(lgt, 'base') and lgt.base.grad is not None:
+            lgt.base.grad *= 64.0
+
+        # Scale MLP texture grads, but only when they exist (not during env-only warmup)
+        mlp = getattr(opt_material, 'kd_ks_normal', None)
+        if mlp is not None:
+            p = mlp.encoder.params
+            if p.requires_grad and p.grad is not None:
+                p.grad /= 8.0
 
         optimizer.step()
         scheduler.step()
@@ -504,6 +518,11 @@ def optimize_mesh(
             remaining_time = (FLAGS.iter-it)*iter_dur_avg
             print("iter=%5d, img_loss=%.6f, reg_loss=%.6f, lr=%.5f, time=%.1f ms, rem=%s" % 
                 (it, img_loss_avg, reg_loss_avg, optimizer.param_groups[0]['lr'], iter_dur_avg*1000, util.time_to_text(remaining_time)))
+
+            lr_env_curr = optimizer.param_groups[0]['lr']
+            lr_mat_curr = optimizer.param_groups[1]['lr']
+            print(f"... lr_env={lr_env_curr:.5e}  lr_mat={lr_mat_curr:.5e} ...")
+
 
     return geometry, opt_material
 
@@ -617,7 +636,8 @@ if __name__ == "__main__":
     #  Create env light with trainable parameters
     # =============================================================================================
     
-    FLAGS.learn_light =     FLAGS.lock_pos = True
+    FLAGS.learn_light = True
+    FLAGS.lock_pos = True
     if FLAGS.learn_light:
         lgt = light.create_trainable_env_rnd(512, scale=0.0, bias=0.5)
     else:
@@ -703,3 +723,5 @@ if __name__ == "__main__":
         light.save_env_map(os.path.join(FLAGS.out_dir, "mesh/probe.hdr"), lgt)
 
 #----------------------------------------------------------------------------
+
+
