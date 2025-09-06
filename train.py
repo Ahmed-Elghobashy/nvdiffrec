@@ -322,9 +322,13 @@ def optimize_mesh(
     #  Setup torch optimizer
     # ==============================================================================================
 
-    learning_rate = FLAGS.learning_rate[pass_idx] if isinstance(FLAGS.learning_rate, list) or isinstance(FLAGS.learning_rate, tuple) else FLAGS.learning_rate
-    learning_rate_pos = learning_rate[0] if isinstance(learning_rate, list) or isinstance(learning_rate, tuple) else learning_rate
-    learning_rate_mat = learning_rate[1] if isinstance(learning_rate, list) or isinstance(learning_rate, tuple) else learning_rate
+    lr_spec = FLAGS.learning_rate
+    if isinstance(lr_spec, (list, tuple)) and lr_spec and isinstance(lr_spec[0], (list, tuple)):
+        pos_lr, mat_lr = lr_spec[pass_idx]
+    elif isinstance(lr_spec, (list, tuple)) and len(lr_spec) == 2:
+        pos_lr, mat_lr = lr_spec
+    else:
+        pos_lr = mat_lr = float(lr_spec)
 
     def lr_schedule(iter, fraction):
         if iter < warmup_iter:
@@ -347,37 +351,39 @@ def optimize_mesh(
         import apex
         from apex.parallel import DistributedDataParallel as DDP
 
-        trainer = DDP(trainer_noddp)
-        trainer.train()
-        if optimize_geometry:
-            optimizer_mesh = apex.optimizers.FusedAdam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
-            scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
+        # trainer = DDP(trainer_noddp)
+        # trainer.train()
+        # if optimize_geometry:
+        #     optimizer_mesh = apex.optimizers.FusedAdam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
+        #     scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
 
-        optimizer = apex.optimizers.FusedAdam(trainer_noddp.params, lr=learning_rate_mat)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
+        # optimizer = apex.optimizers.FusedAdam(trainer_noddp.params, lr=learning_rate_mat)
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
     else:
-        # Single GPU training mode
         trainer = trainer_noddp
+        # Single GPU training mode
         if optimize_geometry:
-            optimizer_mesh = torch.optim.Adam(trainer_noddp.geo_params, lr=learning_rate_pos, betas=betas)
-            scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)) 
+            optimizer_mesh = torch.optim.Adam(trainer_noddp.geo_params, lr=pos_lr, betas=betas)
+            scheduler_mesh = torch.optim.lr_scheduler.LambdaLR(
+                optimizer_mesh, lr_lambda=lambda x: lr_schedule(x, 0.9)
+            )
 
+        # two param groups: [0]=env/light, [1]=materials
         optimizer = torch.optim.Adam(
             [
-                {'params': trainer_noddp.light_params, 'lr': learning_rate_mat},  # group 0: env/light
-                {'params': trainer_noddp.mat_params,   'lr': learning_rate_mat},  # group 1: kd/ks/normal
+                {'params': trainer_noddp.light_params, 'lr': mat_lr},  # group 0
+                {'params': trainer_noddp.mat_params,   'lr': mat_lr},  # group 1
             ]
         )
-        def lr_env(step):  # param group 0 (light/env)
-            base = lr_schedule(step, 0.9)               # your existing decay + (optional) warmup
+
+        def lr_env(step):  # group 0 (light/env)
+            base = lr_schedule(step, 0.9)
             return base if step < FLAGS.env_warmup else base * FLAGS.env_lr_mult
 
-        def lr_mat(step):  # param group 1 (materials)
+        def lr_mat(step):  # group 1 (materials)
             return lr_schedule(step, 0.9)
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer, lr_lambda=[lr_env, lr_mat]
-        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lr_env, lr_mat])
 
     # ==============================================================================================
     #  Training loop
@@ -403,12 +409,12 @@ def optimize_mesh(
     for it, target in enumerate(dataloader_train):
 
         # ---- phase control: env-only -> joint ----
-        if it == 0:
+        if it == 0 and optimize_light and FLAGS.env_warmup > 0:
             # freeze materials for warmup
             for p in trainer_noddp.mat_params:
                 p.requires_grad_(False)
 
-        if it == FLAGS.env_warmup:
+        if it == FLAGS.env_warmup and optimize_light:
             # unfreeze materials
             for p in trainer_noddp.mat_params:
                 p.requires_grad_(True)
@@ -466,6 +472,10 @@ def optimize_mesh(
         # ==============================================================================================
         total_loss = img_loss + reg_loss
 
+
+        total_loss.backward()
+
+        
         img_loss_vec.append(img_loss.item())
         reg_loss_vec.append(reg_loss.item())
 
@@ -687,7 +697,7 @@ if __name__ == "__main__":
         #  Pass 2: Train with fixed topology (mesh)
         # ==============================================================================================
         geometry, mat = optimize_mesh(glctx, geometry, base_mesh.material, lgt, dataset_train, dataset_validate, FLAGS, 
-                    pass_idx=1, pass_name="mesh_pass", warmup_iter=100, optimize_light=FLAGS.learn_light and not FLAGS.lock_light, 
+                    pass_idx=1, pass_name="mesh_pass", warmup_iter=100, optimize_light= False , 
                     optimize_geometry=not FLAGS.lock_pos)
     else:
         # ==============================================================================================
@@ -705,7 +715,7 @@ if __name__ == "__main__":
         mat = initial_guess_material(geometry, False, FLAGS, init_mat=base_mesh.material)
 
         geometry, mat = optimize_mesh(glctx, geometry, mat, lgt, dataset_train, dataset_validate, FLAGS, pass_idx=0, pass_name="mesh_pass", 
-                                        warmup_iter=100, optimize_light= False, optimize_geometry=not FLAGS.lock_pos)
+                                        warmup_iter=100, optimize_light= FLAGS.learn_light, optimize_geometry=not FLAGS.lock_pos)
 
     # ==============================================================================================
     #  Validate

@@ -4,7 +4,7 @@
 
     "random_textures": true,
   
-    "iter": 1000,
+    "iter": 1300,
     "save_interval": 100,
   
     "texture_res": [1024, 1024],
