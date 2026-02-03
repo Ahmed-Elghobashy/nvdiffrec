@@ -49,21 +49,12 @@ class DLMesh(torch.nn.Module):
                                     num_layers=self.FLAGS.layers, msaa=True, background=target['background'], bsdf=bsdf)
 
     def tick(self, glctx, target, lgt, opt_material, loss_fn, iteration):
-        """
-        One training step for the current geometry:
-          - renders the full PBR 'shaded' buffers (for the baseline image loss)
-          - renders a diffuse-only 'kd' buffer (for the intrinsic loss consumer)
-          - stores both buffers on self for downstream consumers
-          - computes and returns (img_loss, reg_loss) as before
-        """
-
-        # ---- shaded (regular) render ----
-        shaded_buffers = self.render(glctx, target, lgt, opt_material, bsdf=None)
-        self.last_render_buffers = shaded_buffers  # for validation/visualization
-
-        # ---- kd (diffuse-only) render for intrinsic loss ----
-        kd_buffers = self.render(glctx, target, lgt, opt_material, bsdf='kd')
-        self.kd_buffers = kd_buffers  # consumed by Trainer when use_intrinsic=True
+        
+        # ==============================================================================================
+        #  Render optimizable object with identical conditions
+        # ==============================================================================================
+        buffers = self.render(glctx, target, lgt, opt_material)
+        self.kd_buffers = buffers  # Cache buffers for intrinsic loss access in train.py
 
         # ==============================================================================================
         #  Compute loss
@@ -72,8 +63,8 @@ class DLMesh(torch.nn.Module):
 
         # Image-space loss, split into a coverage component and a color component
         color_ref = target['img']
-        img_loss = torch.nn.functional.mse_loss(shaded_buffers['shaded'][..., 3:], color_ref[..., 3:]) 
-        img_loss += loss_fn(shaded_buffers['shaded'][..., 0:3] * color_ref[..., 3:], color_ref[..., 0:3] * color_ref[..., 3:])
+        img_loss = torch.nn.functional.mse_loss(buffers['shaded'][..., 3:], color_ref[..., 3:]) 
+        img_loss += loss_fn(buffers['shaded'][..., 0:3] * color_ref[..., 3:], color_ref[..., 0:3] * color_ref[..., 3:])
 
         reg_loss = torch.tensor([0], dtype=torch.float32, device="cuda")
 
@@ -84,10 +75,10 @@ class DLMesh(torch.nn.Module):
             reg_loss += regularizer.laplace_regularizer_const(self.mesh.v_pos - self.initial_guess.v_pos, self.mesh.t_pos_idx) * self.FLAGS.laplace_scale * (1 - t_iter)                
 
         # Albedo (k_d) smoothnesss regularizer
-        reg_loss += torch.mean(shaded_buffers['kd_grad'][..., :-1] * shaded_buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
+        reg_loss += torch.mean(buffers['kd_grad'][..., :-1] * buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
 
         # Visibility regularizer
-        reg_loss += torch.mean(shaded_buffers['occlusion'][..., :-1] * shaded_buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
+        reg_loss += torch.mean(buffers['occlusion'][..., :-1] * buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
 
         # Light white balance regularizer
         reg_loss = reg_loss + lgt.regularizer() * 0.005

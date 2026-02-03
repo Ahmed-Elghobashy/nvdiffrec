@@ -139,11 +139,21 @@ class FlexiCubesGeometry(torch.nn.Module):
 
 
     def tick(self, glctx, target, lgt, opt_material, loss_fn, iteration):
+        """
+        One training step for the current geometry:
+          - renders the full PBR 'shaded' buffers (for the baseline image loss)
+          - renders a diffuse-only 'kd' buffer (for the intrinsic loss consumer)
+          - stores both buffers on self for downstream consumers
+          - computes and returns (img_loss, reg_loss) as before
+        """
 
-        # ==============================================================================================
-        #  Render optimizable object with identical conditions
-        # ==============================================================================================
-        buffers = self.render(glctx, target, lgt, opt_material, training=True)
+        # ---- shaded (regular) render ----
+        shaded_buffers = self.render(glctx, target, lgt, opt_material, training=True, bsdf=None)
+        self.last_render_buffers = shaded_buffers  # for validation/visualization
+
+        # ---- kd (diffuse-only) render for intrinsic loss ----
+        kd_buffers = self.render(glctx, target, lgt, opt_material, training=True, bsdf='kd')
+        self.kd_buffers = kd_buffers  # consumed by Trainer when use_intrinsic=True
 
         # ==============================================================================================
         #  Compute loss
@@ -152,18 +162,18 @@ class FlexiCubesGeometry(torch.nn.Module):
 
         # Image-space loss, split into a coverage component and a color component
         color_ref = target['img']
-        img_loss = torch.nn.functional.l1_loss(buffers['shaded'][..., 3:], color_ref[..., 3:])*5.0 
-        img_loss = img_loss + loss_fn(buffers['shaded'][..., 0:3] * color_ref[..., 3:], color_ref[..., 0:3] * color_ref[..., 3:])
+        img_loss = torch.nn.functional.l1_loss(shaded_buffers['shaded'][..., 3:], color_ref[..., 3:])*5.0 
+        img_loss = img_loss + loss_fn(shaded_buffers['shaded'][..., 0:3] * color_ref[..., 3:], color_ref[..., 0:3] * color_ref[..., 3:])
 
         # SDF regularizer
         sdf_weight = self.FLAGS.sdf_regularizer - (self.FLAGS.sdf_regularizer - 0.01)*min(1.0, 4.0 * t_iter)
         reg_loss = sdf_reg_loss(self.sdf, self.all_edges).mean() * sdf_weight # Dropoff to 0.01
 
         # Albedo (k_d) smoothnesss regularizer
-        reg_loss += torch.mean(buffers['kd_grad'][..., :-1] * buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
+        reg_loss += torch.mean(shaded_buffers['kd_grad'][..., :-1] * shaded_buffers['kd_grad'][..., -1:]) * 0.03 * min(1.0, iteration / 500)
 
         # Visibility regularizer
-        reg_loss += torch.mean(buffers['occlusion'][..., :-1] * buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
+        reg_loss += torch.mean(shaded_buffers['occlusion'][..., :-1] * shaded_buffers['occlusion'][..., -1:]) * 0.001 * min(1.0, iteration / 500)
 
         # FlexiCubes reg loss
         reg_loss += self.flexi_reg_loss* 0.25

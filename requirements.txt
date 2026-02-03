@@ -1,0 +1,13 @@
+ninja
+imageio
+imageio-ffmpeg
+PyOpenGL
+glfw
+xatlas
+gdown
+git+https://github.com/NVlabs/nvdiffrast/
+git+https://github.com/NVlabs/tiny-cuda-nn#subdirectory=bindings/torch
+Pillow
+numpy
+scipy
+matplotlib
